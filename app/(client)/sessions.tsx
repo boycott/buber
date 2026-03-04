@@ -10,6 +10,7 @@ import {
   Linking,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { getSessions, getActiveUser } from '../../lib/api/supabase-api';
 import { router } from 'expo-router';
 import type { Session } from '../../types/admin';
 
@@ -28,33 +29,28 @@ export default function ClientSessionsScreen() {
 
   const fetchSessions = async () => {
     setLoading(true);
-    try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+    const userResult = await getActiveUser();
 
-      if (!user) {
+    userResult.match({
+      Success: async (user: any) => {
+        const sessionsResult = await getSessions(user.id, false);
+        sessionsResult.match({
+          Success: (data: Session[]) => {
+            setSessions(data);
+            setLoading(false);
+          },
+          Failure: (err: string) => {
+            console.error('Failed to fetch sessions:', err);
+            Alert.alert('Error', 'Failed to load sessions');
+            setLoading(false);
+          }
+        });
+      },
+      Failure: (err: string) => {
         setSessions([]);
-        return;
+        setLoading(false);
       }
-
-      const { data, error } = await supabase
-        .from('Session')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('start_time', { ascending: false });
-
-      if (error) throw error;
-
-      if (data) {
-        setSessions(data);
-      }
-    } catch (error) {
-      console.error('Failed to fetch sessions:', error);
-      Alert.alert('Error', 'Failed to load sessions');
-    } finally {
-      setLoading(false);
-    }
+    });
   };
 
   const handlePay = async (session: Session) => {
@@ -229,10 +225,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 16,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
+    boxShadow: '0px 1px 2px rgba(0, 0, 0, 0.1)',
     elevation: 2,
   },
   sessionHeader: {

@@ -11,6 +11,7 @@ import {
   Alert,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { getClients } from '../../lib/api/supabase-api';
 import type { Client } from '../../types/admin';
 
 export default function ClientsScreen() {
@@ -25,29 +26,26 @@ export default function ClientsScreen() {
 
   const fetchClients = async () => {
     setLoading(true);
-    try {
-      const { data: profiles, error } = await supabase
-        .from('Profile')
-        .select('*')
-        .eq('role', 'client');
+    const result = await getClients();
 
-      if (error) throw error;
-
-      if (profiles) {
-        const clientsData: Client[] = profiles.map((p: any) => ({
-          id: p.id,
-          name: `${p.given_name} ${p.family_name}`,
-          given_name: p.given_name,
-          family_name: p.family_name,
-        }));
+    result.match({
+      Success: (profiles: any[]) => {
+        const clientsData: Client[] = profiles
+          .map((p: any) => ({
+            id: p.id,
+            name: `${p.given_name} ${p.family_name}`,
+            given_name: p.given_name,
+            family_name: p.family_name,
+          }));
         setClients(clientsData);
+        setLoading(false);
+      },
+      Failure: (err: string) => {
+        console.error('Failed to fetch clients:', err);
+        Alert.alert('Error', 'Failed to load clients');
+        setLoading(false);
       }
-    } catch (error) {
-      console.error('Failed to fetch clients:', error);
-      Alert.alert('Error', 'Failed to load clients');
-    } finally {
-      setLoading(false);
-    }
+    });
   };
 
   const openEditModal = (client: Client) => {
@@ -202,10 +200,7 @@ const styles = StyleSheet.create({
     padding: 16,
     borderRadius: 8,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
+    boxShadow: '0px 1px 2px rgba(0, 0, 0, 0.1)',
     elevation: 2,
   },
   avatar: {

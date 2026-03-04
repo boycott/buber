@@ -2,8 +2,7 @@ import { useState, useEffect } from 'react';
 import { View, StyleSheet, ActivityIndicator, Alert } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { WebView } from 'react-native-webview';
-import { supabase } from '../../lib/supabase';
-
+import { getMeetingParticipantToken } from '../../lib/api/supabase-api';
 export default function MeetingPage() {
   const { custom_participant_id } = useLocalSearchParams<{ custom_participant_id: string }>();
   const [token, setToken] = useState<string | null>(null);
@@ -20,28 +19,20 @@ export default function MeetingPage() {
       return;
     }
 
-    try {
-      const { data, error } = await supabase
-        .from('MeetingParticipant')
-        .select('token')
-        .eq('custom_participant_id', custom_participant_id)
-        .limit(1)
-        .single();
+    const tokenRes = await getMeetingParticipantToken(custom_participant_id);
 
-      if (error) throw error;
-
-      if (!data?.token) {
-        throw new Error('No token found for this participant');
+    tokenRes.match({
+      Success: (resolvedToken: string) => {
+        setToken(resolvedToken);
+        setLoading(false);
+      },
+      Failure: (err: string) => {
+        console.error('Failed to fetch token:', err);
+        Alert.alert('Error', 'Failed to load meeting. Please try again.');
+        router.back();
+        setLoading(false);
       }
-
-      setToken(data.token);
-    } catch (error) {
-      console.error('Failed to fetch token:', error);
-      Alert.alert('Error', 'Failed to load meeting. Please try again.');
-      router.back();
-    } finally {
-      setLoading(false);
-    }
+    });
   };
 
   if (loading) {

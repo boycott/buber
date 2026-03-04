@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import { supabase } from '../../lib/supabase';
+import { getSessions, getClients, getActiveUser, getUserMeetings } from '../../lib/api/supabase-api';
 import type { Session, Client, Meeting } from '../../types/admin';
 
 export default function SessionsScreen() {
@@ -39,68 +40,66 @@ export default function SessionsScreen() {
 
   const fetchData = async () => {
     setLoading(true);
-    try {
-      // Fetch sessions
-      const { data: sessionsData, error: sessionsError } = await supabase
-        .from('Session')
-        .select('*')
-        .order('start_time', { ascending: true });
 
-      if (sessionsError) throw sessionsError;
+    const userResult = await getActiveUser();
 
-      if (sessionsData) {
-        setSessions(sessionsData);
-      }
+    // We can fetch Sessions and Clients concurrently (or fallback to empty on error)
+    // For a pure-effect approach, we pattern match the results.
+    // In a real monadic flow we might use sequence or map, but here we handle them sequentially for simplicity.
 
-      // Fetch clients
-      const { data: clientsData, error: clientsError } = await supabase
-        .from('Profile')
-        .select('*')
-        .eq('role', 'client');
+    const user = userResult.match({
+      Success: (u: any) => u,
+      Failure: () => null
+    });
 
-      if (clientsError) throw clientsError;
-
-      if (clientsData) {
-        const clientsList: Client[] = clientsData.map((p: any) => ({
-          id: p.id,
-          name: `${p.given_name} ${p.family_name}`,
-          given_name: p.given_name,
-          family_name: p.family_name,
-        }));
-        setClients(clientsList);
-      }
-
-      // Note: Meetings would need to be fetched from Cloudflare API
-      // For now, we'll fetch from Supabase Meeting table
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (user) {
-        const { data: meetingsData, error: meetingsError } = await supabase
-          .from('Meeting')
-          .select('meeting_id')
-          .eq('user_id', user.id);
-
-        if (!meetingsError && meetingsData) {
-          // Simplified: just store meeting IDs
-          // In a real implementation, you'd fetch full details from Cloudflare
-          setMeetings(
-            meetingsData.map((m: any) => ({
-              id: m.meeting_id,
-              name: 'Meeting',
-              date: '',
-              participants: [],
-            }))
-          );
-        }
-      }
-    } catch (error) {
-      console.error('Failed to fetch data:', error);
-      Alert.alert('Error', 'Failed to load data');
-    } finally {
+    if (!user) {
       setLoading(false);
+      return;
     }
+
+    const [sessionsResult, clientsResult, meetingsResult] = await Promise.all([
+      getSessions(user.id, true),
+      getClients(),
+      getUserMeetings(user.id)
+    ]);
+
+    sessionsResult.match({
+      Success: (data: Session[]) => setSessions(data),
+      Failure: (err: string) => {
+        console.error('Failed to fetch sessions:', err);
+        Alert.alert('Error', 'Failed to load sessions');
+      }
+    });
+
+    clientsResult.match({
+      Success: (profiles: any[]) => {
+        const clientsList: Client[] = profiles
+          .map((p: any) => ({
+            id: p.id,
+            name: `${p.given_name} ${p.family_name}`,
+            given_name: p.given_name,
+            family_name: p.family_name,
+          }));
+        setClients(clientsList);
+      },
+      Failure: (err: string) => console.error('Failed to fetch clients:', err)
+    });
+
+    meetingsResult.match({
+      Success: (mResult: any[]) => {
+        setMeetings(
+          mResult.map((m: any) => ({
+            id: m.meeting_id,
+            name: 'Meeting',
+            date: '',
+            participants: [],
+          }))
+        );
+      },
+      Failure: (err: string) => console.error('Failed to fetch user meetings:', err)
+    });
+
+    setLoading(false);
   };
 
   const openCreateModal = () => {
@@ -420,10 +419,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 16,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
+    boxShadow: '0px 1px 2px rgba(0, 0, 0, 0.1)',
     elevation: 2,
   },
   sessionInfo: {

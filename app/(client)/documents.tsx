@@ -10,6 +10,7 @@ import {
   Linking,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { getDocuments } from '../../lib/api/supabase-api';
 
 type Document = {
   id: string;
@@ -29,33 +30,28 @@ export default function ClientDocumentsScreen() {
 
   const fetchDocuments = async () => {
     setLoading(true);
-    try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
 
-      if (!user) {
-        setDocuments([]);
-        return;
-      }
-
-      const { data, error } = await supabase
-        .from('Document')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-
-      if (data) {
-        setDocuments(data);
-      }
-    } catch (error) {
-      console.error('Failed to fetch documents:', error);
-      Alert.alert('Error', 'Failed to load documents');
-    } finally {
+    if (!user) {
+      setDocuments([]);
       setLoading(false);
+      return;
     }
+
+    const result = await getDocuments(user.id);
+    result.match({
+      Success: (data: Document[]) => {
+        setDocuments(data);
+        setLoading(false);
+      },
+      Failure: (err: string) => {
+        console.error('Failed to fetch documents:', err);
+        Alert.alert('Error', 'Failed to load documents');
+        setLoading(false);
+      }
+    });
   };
 
   const handleViewDocument = async (url: string) => {
@@ -148,10 +144,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 16,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
+    boxShadow: '0px 1px 2px rgba(0, 0, 0, 0.1)',
     elevation: 2,
   },
   documentInfo: {

@@ -41,6 +41,13 @@ export default function AdminLayout() {
           tabBarIcon: ({ color }) => <FontAwesome name="list" size={24} color={color} />,
         }}
       />
+      <Tabs.Screen
+        name="comments"
+        options={{
+          title: 'Comments',
+          tabBarIcon: ({ color }) => <FontAwesome name="comment" size={24} color={color} />,
+        }}
+      />
     </Tabs>
   );
 }

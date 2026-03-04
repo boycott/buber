@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase';
 
 import { router } from 'expo-router';
 import { Text, TextInput, TouchableOpacity } from 'react-native';
+import { getActiveUser, getUserProfile } from '../lib/api/supabase-api';
 
 // Simple UI components since we don't have @rneui/themed installed yet or configured
 // and I want to keep dependencies minimal as per plan, but I can use basic RN components.
@@ -17,10 +18,11 @@ export default function Auth() {
 
   useEffect(() => {
     // Check if user is already logged in
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session) {
-        checkUserRole(session.user.id);
-      }
+    getActiveUser().then(res => {
+      res.match({
+        Success: (user) => checkUserRole(user.id),
+        Failure: () => { } // Not logged in
+      });
     });
 
     supabase.auth.onAuthStateChange((_event, session) => {
@@ -31,23 +33,20 @@ export default function Auth() {
   }, []);
 
   async function checkUserRole(userId: string) {
-    const { data: profile, error } = await supabase
-      .from('Profile')
-      .select('*')
-      .eq('id', userId)
-      .single();
+    const profileResult = await getUserProfile(userId);
 
-    if (error) {
-      console.error('Error fetching profile:', error);
-      // Fallback or error handling
-      return;
-    }
-
-    if (profile?.role === 'admin') {
-      router.replace('/(admin)');
-    } else {
-      router.replace('/(client)');
-    }
+    profileResult.match({
+      Success: (profile: any) => {
+        if (profile?.role === 'admin') {
+          router.replace('/(admin)');
+        } else {
+          router.replace('/(client)');
+        }
+      },
+      Failure: (err: any) => {
+        console.error('Error fetching profile:', err);
+      }
+    });
   }
 
   async function signInWithEmail() {

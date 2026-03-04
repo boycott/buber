@@ -12,11 +12,17 @@ import {
   ScrollView,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { getActiveUser, getUserMeetings } from '../../lib/api/supabase-api';
+import { getParticipantsCF, createMeetingCF, addParticipantCF, deleteParticipantCF, fetchCF, listMeetingsCF } from '../../lib/api/cf-api';
 import { router } from 'expo-router';
 import type { Meeting, Participant } from '../../types/admin';
 
-const RTK_API_URL = 'https://api.realtime.cloudflare.com/v2';
-const RTK_AUTH_HEADER = process.env.EXPO_PUBLIC_RTK_API_AUTH_HEADER || '';
+// Re-using the same env setup for any remaining direct calls if absolutely needed,
+// but most are moved to lib/api/cf-api.ts
+const RTK_ACCOUNT_ID = process.env.EXPO_PUBLIC_RTK_ACCOUNT_ID || '';
+const RTK_APP_ID = process.env.EXPO_PUBLIC_RTK_APP_ID || '';
+const RTK_API_URL = `https://api.cloudflare.com/client/v4/accounts/${RTK_ACCOUNT_ID}/realtime/kit/${RTK_APP_ID}`;
+const RTK_AUTH_HEADER = `Bearer ${process.env.EXPO_PUBLIC_RTK_API_AUTH_HEADER || ''}`;
 
 export default function MeetingsScreen() {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
@@ -39,108 +45,87 @@ export default function MeetingsScreen() {
 
   const fetchMeetings = async () => {
     setLoading(true);
-    try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
 
-      if (!user) {
+    const userResult = await getActiveUser();
+
+    userResult.match({
+      Failure: () => {
         setMeetings([]);
-        return;
-      }
+        setLoading(false);
+      },
+      Success: async (user: any) => {
+        const meetingsResult = await getUserMeetings(user.id);
 
-      // Get meeting IDs from Supabase
-      const { data: userMeetings, error } = await supabase
-        .from('Meeting')
-        .select('meeting_id')
-        .eq('user_id', user.id);
-
-      if (error) throw error;
-
-      if (!userMeetings || userMeetings.length === 0) {
-        setMeetings([]);
-        return;
-      }
-
-      // Fetch details from Cloudflare
-      const meetingPromises = userMeetings.map(async (um: { meeting_id: string }) => {
-        try {
-          const response = await fetch(`${RTK_API_URL}/meetings/${um.meeting_id}`, {
-            headers: {
-              Accept: 'application/json',
-              Authorization: RTK_AUTH_HEADER,
-            },
-          });
-
-          if (!response.ok) {
-            if (response.status === 404) {
-              console.warn(`Meeting ${um.meeting_id} not found`);
-              return null;
+        meetingsResult.match({
+          Failure: () => {
+            setMeetings([]);
+            setLoading(false);
+          },
+          Success: async (userMeetings: any[]) => {
+            if (!userMeetings || userMeetings.length === 0) {
+              setMeetings([]);
+              setLoading(false);
+              return;
             }
-            throw new Error(`Failed to fetch meeting: ${response.statusText}`);
-          }
 
-          const json = await response.json();
-          const m = json.result || json.data || json;
+            const ownedIds = new Set(userMeetings.map((um: { meeting_id: string }) => um.meeting_id));
 
-          return {
-            id: m.id,
-            name: m.title || m.name || 'Untitled Meeting',
-            date: m.created_at
-              ? new Date(m.created_at).toLocaleDateString()
-              : new Date().toLocaleDateString(),
-            participants: [],
-          };
-        } catch (err) {
-          console.error(err);
-          return null;
-        }
-      });
+            // Single call to list all meetings from Cloudflare
+            const listRes = await listMeetingsCF();
 
-      const fetchedMeetings = (await Promise.all(meetingPromises)).filter(
-        (m) => m !== null
-      ) as Meeting[];
+            listRes.match({
+              Failure: () => {
+                // Fallback: show basic info from Supabase only
+                setMeetings(
+                  userMeetings.map((um: { meeting_id: string }) => ({
+                    id: um.meeting_id,
+                    name: 'Meeting',
+                    date: new Date().toLocaleDateString(),
+                    participants: [],
+                  })),
+                );
+                setLoading(false);
+              },
+              Success: async (allCfMeetings: any[]) => {
+                // Filter to only meetings the user owns
+                const ownedMeetings = (Array.isArray(allCfMeetings) ? allCfMeetings : [])
+                  .filter((m: any) => ownedIds.has(m.id));
 
-      // Fetch participants for each meeting
-      await Promise.all(
-        fetchedMeetings.map(async (meeting) => {
-          try {
-            const response = await fetch(
-              `${RTK_API_URL}/meetings/${meeting.id}/participants`,
-              {
-                headers: {
-                  'Content-Type': 'application/json',
-                  Accept: 'application/json',
-                  Authorization: RTK_AUTH_HEADER,
-                },
-              }
-            );
+                const fetchedMeetings: Meeting[] = ownedMeetings.map((m: any) => ({
+                  id: m.id,
+                  name: m.title || m.name || 'Untitled Meeting',
+                  date: m.created_at
+                    ? new Date(m.created_at).toLocaleDateString()
+                    : new Date().toLocaleDateString(),
+                  participants: [],
+                }));
 
-            if (response.ok) {
-              const json = await response.json();
-              const pData = json.result || json.data || json;
-              const participantsData = Array.isArray(pData) ? pData : [];
+                // Fetch participants for each meeting
+                await Promise.all(
+                  fetchedMeetings.map(async (meeting) => {
+                    const partsRes = await getParticipantsCF(meeting.id);
+                    partsRes.match({
+                      Success: (participantsData: any[]) => {
+                        meeting.participants = (Array.isArray(participantsData) ? participantsData : []).map((p: any) => ({
+                          id: p.id,
+                          name: p.custom_participant_id,
+                          email: p.email || '',
+                          preset_name: p.preset_name || 'group_call_participant',
+                        }));
+                      },
+                      Failure: (err: string) => console.error(`Failed to fetch participants for meeting ${meeting.id}`, err),
+                    });
+                  }),
+                );
 
-              meeting.participants = participantsData.map((p: any) => ({
-                id: p.id,
-                name: p.custom_participant_id,
-                email: p.email || '',
-                preset_name: p.preset_name || 'group_call_participant',
-              }));
-            }
-          } catch (err) {
-            console.error(`Failed to fetch participants for meeting ${meeting.id}`, err);
-          }
-        })
-      );
-
-      setMeetings(fetchedMeetings);
-    } catch (error) {
-      console.error('Failed to fetch meetings:', error);
-      Alert.alert('Error', 'Failed to load meetings');
-    } finally {
-      setLoading(false);
-    }
+                setMeetings(fetchedMeetings);
+                setLoading(false);
+              },
+            });
+          },
+        });
+      },
+    });
   };
 
   const createMeeting = async () => {
@@ -150,135 +135,110 @@ export default function MeetingsScreen() {
     }
 
     setLoading(true);
-    try {
-      const response = await fetch(`${RTK_API_URL}/meetings`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          Authorization: RTK_AUTH_HEADER,
-        },
-        body: JSON.stringify({ title: newMeetingTitle }),
-      });
 
-      if (!response.ok) {
-        throw new Error(`Failed to create meeting: ${response.statusText}`);
-      }
+    const createRes = await createMeetingCF(newMeetingTitle);
 
-      const data = await response.json();
-      const newMeeting = data.result || data;
-      const meetingId = newMeeting.id || crypto.randomUUID();
+    createRes.match({
+      Failure: (err: string) => {
+        console.error('Failed to create meeting:', err);
+        Alert.alert('Error', 'Failed to create meeting');
+        setLoading(false);
+      },
+      Success: async (newMeeting: any) => {
+        const meetingId = newMeeting.id || crypto.randomUUID();
 
-      // Save to Supabase
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+        // Save to Supabase
+        const userRes = await getActiveUser();
 
-      if (user) {
-        const { error } = await supabase.from('Meeting').insert({
-          user_id: user.id,
-          meeting_id: meetingId,
+        userRes.match({
+          Success: async (user: any) => {
+            const { error } = await supabase.from('Meeting').insert({
+              user_id: user.id,
+              meeting_id: meetingId,
+            });
+
+            if (error) {
+              console.error('Failed to save meeting to Supabase:', error);
+              Alert.alert('Warning', 'Meeting created but failed to save to database');
+            }
+          },
+          Failure: () => { }
         });
 
-        if (error) {
-          console.error('Failed to save meeting to Supabase:', error);
-          Alert.alert('Warning', 'Meeting created but failed to save to database');
-        }
+        setMeetings([
+          ...meetings,
+          {
+            id: meetingId,
+            name: newMeeting.name || newMeetingTitle,
+            date: newMeeting.created_at
+              ? new Date(newMeeting.created_at).toLocaleDateString()
+              : new Date().toLocaleDateString(),
+            participants: [],
+          },
+        ]);
+
+        setCreateModalOpen(false);
+        setNewMeetingTitle('');
+        setLoading(false);
       }
-
-      setMeetings([
-        ...meetings,
-        {
-          id: meetingId,
-          name: newMeeting.name || newMeetingTitle,
-          date: newMeeting.created_at
-            ? new Date(newMeeting.created_at).toLocaleDateString()
-            : new Date().toLocaleDateString(),
-          participants: [],
-        },
-      ]);
-
-      setCreateModalOpen(false);
-      setNewMeetingTitle('');
-    } catch (error) {
-      console.error('Failed to create meeting:', error);
-      Alert.alert('Error', 'Failed to create meeting');
-    } finally {
-      setLoading(false);
-    }
+    });
   };
 
   const addParticipant = async () => {
     if (!selectedMeetingId) return;
 
     setLoading(true);
-    try {
-      const custom_participant_id = new Date().getTime().toString(36);
-      const response = await fetch(
-        `${RTK_API_URL}/meetings/${selectedMeetingId}/participants`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: RTK_AUTH_HEADER,
-          },
-          body: JSON.stringify({
-            preset_name: selectedPreset,
-            custom_participant_id,
-          }),
+
+    const custom_participant_id = new Date().getTime().toString(36);
+
+    const partRes = await addParticipantCF(selectedMeetingId, selectedPreset, custom_participant_id);
+
+    partRes.match({
+      Failure: (err: string) => {
+        console.error('Failed to add participant:', err);
+        Alert.alert('Error', 'Failed to add participant');
+        setLoading(false);
+      },
+      Success: async (newParticipantData: any) => {
+        // Save to Supabase
+        const { error } = await supabase.from('MeetingParticipant').insert({
+          participant_id: newParticipantData.id,
+          meeting_id: selectedMeetingId,
+          token: newParticipantData.token,
+          custom_participant_id: custom_participant_id,
+          preset_name: selectedPreset,
+        });
+
+        if (error) {
+          console.error('Failed to save participant to Supabase:', error);
+          Alert.alert('Warning', 'Participant added but failed to save to database');
         }
-      );
 
-      if (!response.ok) {
-        throw new Error(`Failed to add participant: ${response.statusText}`);
+        // Update local state
+        setMeetings((prev) =>
+          prev.map((m) =>
+            m.id === selectedMeetingId
+              ? {
+                ...m,
+                participants: [
+                  ...m.participants,
+                  {
+                    id: newParticipantData.id || custom_participant_id,
+                    name: newParticipantData.name || `Participant ${m.participants.length + 1}`,
+                    email: newParticipantData.email || '',
+                    preset_name: selectedPreset,
+                  },
+                ],
+              }
+              : m
+          )
+        );
+
+        setAddParticipantModalOpen(false);
+        setSelectedMeetingId(null);
+        setLoading(false);
       }
-
-      const data = await response.json();
-      const newParticipantData = data.data || data;
-
-      // Save to Supabase
-      const { error } = await supabase.from('MeetingParticipant').insert({
-        participant_id: newParticipantData.id,
-        meeting_id: selectedMeetingId,
-        token: newParticipantData.token,
-        custom_participant_id: custom_participant_id,
-        preset_name: selectedPreset,
-      });
-
-      if (error) {
-        console.error('Failed to save participant to Supabase:', error);
-        Alert.alert('Warning', 'Participant added but failed to save to database');
-      }
-
-      // Update local state
-      setMeetings((prev) =>
-        prev.map((m) =>
-          m.id === selectedMeetingId
-            ? {
-              ...m,
-              participants: [
-                ...m.participants,
-                {
-                  id: newParticipantData.id || custom_participant_id,
-                  name: newParticipantData.name || `Participant ${m.participants.length + 1}`,
-                  email: newParticipantData.email || '',
-                  preset_name: selectedPreset,
-                },
-              ],
-            }
-            : m
-        )
-      );
-
-      setAddParticipantModalOpen(false);
-      setSelectedMeetingId(null);
-    } catch (error) {
-      console.error('Failed to add participant:', error);
-      Alert.alert('Error', 'Failed to add participant');
-    } finally {
-      setLoading(false);
-    }
+    });
   };
 
   const deleteParticipant = async (meetingId: string, participantId: string) => {
@@ -300,24 +260,18 @@ export default function MeetingsScreen() {
             )
           );
 
-          try {
-            // Delete from Supabase
-            await supabase.from('MeetingParticipant').delete().eq('participant_id', participantId);
+          // Delete from Supabase
+          await supabase.from('MeetingParticipant').delete().eq('participant_id', participantId);
 
-            // Delete from Cloudflare
-            await fetch(`${RTK_API_URL}/meetings/${meetingId}/participants/${participantId}`, {
-              method: 'DELETE',
-              headers: {
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-                Authorization: RTK_AUTH_HEADER,
-              },
-            });
-          } catch (error) {
-            console.error('Error deleting participant:', error);
-            Alert.alert('Error', 'Failed to delete participant. Please refresh.');
-            fetchMeetings();
-          }
+          const delRes = await deleteParticipantCF(meetingId, participantId);
+          delRes.match({
+            Success: () => { },
+            Failure: (err: string) => {
+              console.error('Error deleting participant:', err);
+              Alert.alert('Error', 'Failed to delete participant. Please refresh.');
+              fetchMeetings();
+            }
+          })
         },
       },
     ]);
@@ -561,10 +515,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'white',
     borderRadius: 8,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
+    boxShadow: '0px 1px 2px rgba(0, 0, 0, 0.1)',
     elevation: 2,
   },
   meetingHeader: {
